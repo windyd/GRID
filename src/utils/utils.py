@@ -9,7 +9,10 @@ from transformers.cache_utils import DynamicCache
 from src.utils import pylogger, rich_utils
 from functools import partial
 from tokenizers.processors import TemplateProcessing
-from src.data.loading.components.interfaces import TokenizerConfig
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.data.loading.components.interfaces import TokenizerConfig
 
 log = pylogger.RankedLogger(__name__, rank_zero_only=True)
 
@@ -220,7 +223,7 @@ def lightning_precision_to_dtype(precision: str) -> torch.dtype:
             "Supported precision types are: '32', '32-true', '64', '16', '16-mixed', 'bf16', 'half'."
         )
 
-def load_tokenize(config: TokenizerConfig) -> Any:
+def load_tokenize(config: "TokenizerConfig") -> Any:
     """Load tokenizer and return a partial function for tokenization."""
     tokenizer = config.tokenizer
     if hasattr(config, "special_tokens"):

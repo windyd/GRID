@@ -1,6 +1,6 @@
 # @package _global_
 data_dir: ???
-embedding_model: google/flan-t5-xl
+embedding_model: /data/models/google/flan-t5-xl
 
 task_name: inference
 id: ${now:%Y-%m-%d}/${now:%H-%M-%S}
