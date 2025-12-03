@@ -3,6 +3,7 @@ import random
 from abc import ABC, abstractmethod
 from typing import Callable, Dict, List
 
+import pyarrow.parquet as pq
 
 from src.utils.decorators import retry
 from src.utils.file_utils import open_pyarrow_file
