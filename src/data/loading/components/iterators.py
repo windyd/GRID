@@ -1,3 +1,6 @@
+import gzip
+import io
+import json
 import os
 import random
 from abc import ABC, abstractmethod
@@ -6,7 +9,7 @@ from typing import Callable, Dict, List
 import pyarrow.parquet as pq
 
 from src.utils.decorators import retry
-from src.utils.file_utils import open_pyarrow_file
+from src.utils.file_utils import open_local_or_remote, open_pyarrow_file
 
 # We suppress the tensorflow warnings. Needs to happend before the tf import
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -60,6 +63,7 @@ class RawDataIterator(ABC):
         except StopIteration:
             return None
 
+
 class ParquetDataIterator(RawDataIterator):
     """Data iterator class for parquet files
 
@@ -102,6 +106,7 @@ class ParquetDataIterator(RawDataIterator):
 
     def get_file_suffix(self) -> str:
         return "parquet"
+
 
 class TFRecordIterator(RawDataIterator):
     """Data iterator class for tfrecord files
@@ -227,3 +232,62 @@ class TFRecordIterator(RawDataIterator):
 
     def get_file_suffix(self) -> str:
         return "tfrecord.gz"
+
+
+class JsonlDataIterator(RawDataIterator):
+    """Data iterator class for jsonl files
+
+    Parameters
+    ----------
+    list_of_file_paths : List[str]
+
+        the list of file paths to read from
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def iterrows(self):
+        assert self.list_of_file_paths is not None, "list_of_file_paths is not set"
+
+        for file_path in self.list_of_file_paths:
+            is_gzipped = file_path.endswith(".gz")
+
+            with open_local_or_remote(file_path, "rb") as f:
+                if is_gzipped:
+                    with gzip.open(f, mode="rt") as text_f:
+                        for line in text_f:
+                            if line.strip():
+                                yield json.loads(line)
+
+                else:
+                    with io.TextIOWrapper(f, encoding="utf-8") as text_f:
+                        for line in text_f:
+                            if line.strip():
+                                yield json.loads(line)
+
+    def iter_batches(self, batch_size: int):
+        assert self.list_of_file_paths is not None, "list_of_file_paths is not set"
+
+        batch = []
+
+        for row in self.iterrows():
+            batch.append(row)
+
+            if len(batch) == batch_size:
+                yield batch
+
+                batch = []
+
+        if batch:
+            yield batch
+
+    def shuffle(self, seed=42) -> RawDataIterator:
+        random.seed(seed)
+
+        random.shuffle(self.list_of_file_paths)  # type: ignore
+
+        return self
+
+    def get_file_suffix(self) -> str:
+        return "jsonl.gz"
