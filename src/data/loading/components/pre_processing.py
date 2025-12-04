@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Union
 import numpy as np
 import tensorflow as tf
 import torch
+import zlib
 from src.utils.file_utils import load_json
 from src.data.loading.components.interfaces import (
     BaseDatasetConfig,
@@ -13,6 +14,7 @@ from src.data.loading.components.interfaces import TokenizerConfig
 from src.utils.utils import load_tokenize
 
 # support functions
+
 
 def convert_bytes_to_string(
     batch_or_row: Dict[str, np.ndarray],
@@ -25,6 +27,7 @@ def convert_bytes_to_string(
         if is_feature_in_features_to_apply(features_to_apply, k):
             batch_or_row[k] = batch_or_row[k].astype(str)
     return batch_or_row
+
 
 def is_feature_in_features_to_apply(features_to_apply: List[str], k: str) -> bool:
     if len(features_to_apply) > 0 and k not in features_to_apply:
@@ -95,11 +98,18 @@ def convert_fields_to_tensors(
         if is_feature_in_features_to_apply(features_to_apply, k):
             if isinstance(v, int) or isinstance(v, float):
                 v = [int(v)]
-            batch_or_row[k] = torch.tensor(v, dtype=dataset_config.field_type_map.get(k, torch.long))  # type: ignore
+            batch_or_row[k] = torch.tensor(
+                v, dtype=dataset_config.field_type_map.get(k, torch.long)
+            )  # type: ignore
     return batch_or_row
 
 
-def filter_sequence_length_row(row: Dict[str, torch.Tensor], dataset_config: BaseDatasetConfig, features_to_apply: Optional[List[str]] = [], **kwargs) -> Dict[str, np.ndarray]:  # type: ignore
+def filter_sequence_length_row(
+    row: Dict[str, torch.Tensor],
+    dataset_config: BaseDatasetConfig,
+    features_to_apply: Optional[List[str]] = [],
+    **kwargs,
+) -> Dict[str, np.ndarray]:  # type: ignore
     # Only works for a row right now. This filters out rows that have fields with sequence length smaller than the min threshold.
     # TODO(lneves): Make this work for a batch as well without creating batches of different sizes.
     for _, tensor in row.items():
@@ -108,7 +118,12 @@ def filter_sequence_length_row(row: Dict[str, torch.Tensor], dataset_config: Bas
     return row
 
 
-def filter_empty_feature(row: Dict[str, torch.Tensor], dataset_config: BaseDatasetConfig, features_to_apply: Optional[List[str]] = [], **kwargs) -> Dict[str, np.ndarray]:  # type: ignore
+def filter_empty_feature(
+    row: Dict[str, torch.Tensor],
+    dataset_config: BaseDatasetConfig,
+    features_to_apply: Optional[List[str]] = [],
+    **kwargs,
+) -> Dict[str, np.ndarray]:  # type: ignore
     # Only works for a row right now. This filters out rows that have fields with empty tensors.
     for k, v in row.items():
         if is_feature_in_features_to_apply(features_to_apply, k):
@@ -140,9 +155,9 @@ def map_sparse_id_to_semantic_id(
                 if num_hierarchies is None:
                     row[k] = id_map.t()[v].view(-1)
                 else:
-                    assert num_hierarchies <= id_map.size(
-                        0
-                    ), "num_hierarchies must be less than or equal to the number of hierarchies in the semantic id map."
+                    assert num_hierarchies <= id_map.size(0), (
+                        "num_hierarchies must be less than or equal to the number of hierarchies in the semantic id map."
+                    )
                     row[k] = id_map[:num_hierarchies].t()[v].view(-1)
             else:
                 raise ValueError(f"Semantic id map not found for feature {k}")
@@ -192,6 +207,7 @@ def trim_sequence_row(
                 v = v[:sequence_length]
                 row[k] = v
     return row
+
 
 def tokenize_text_features(
     batch_or_row: Dict[str, Any],
@@ -270,10 +286,9 @@ def preprocess_categorical_feature_to_idx(
     return batch_or_row
 
 
-
 def map_sparse_id_to_embedding(
     row: Dict[str, Any],
-    dataset_config = None,
+    dataset_config=None,
     features_to_apply: Optional[List[str]] = [],
     sparse_id_field: str = "id",
     embedding_field_to_add: str = "embedding",
@@ -315,3 +330,40 @@ def squeeze_tensor_in_place(
                     f"Unsupported type for feature {k}: {type(v)}. Expected torch.Tensor or list."
                 )
     return batch_or_row
+
+
+def convert_string_to_int_hash(
+    batch_or_row: Dict[str, Any],
+    features_to_apply: Optional[List[str]] = [],
+    num_buckets: int = 2147483647,  # Default to max signed 32-bit int
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Hashes string features to integers in range [0, num_buckets).
+    Useful for prototyping with string IDs without a fixed vocabulary.
+    """
+    for k, v in batch_or_row.items():
+        if is_feature_in_features_to_apply(features_to_apply, k):
+            # Helper to hash a single value
+            def hash_val(val):
+                if isinstance(val, str):
+                    # zlib.adler32 is fast and deterministic, returns unsigned 32-bit int
+                    # We take modulo num_buckets to ensure it fits in desired range
+                    return zlib.adler32(val.encode("utf-8")) % num_buckets
+                elif isinstance(val, (int, float)):
+                    return int(val) % num_buckets
+                return 0  # Fallback
+
+            if isinstance(v, list):
+                batch_or_row[k] = [hash_val(item) for item in v]
+            elif isinstance(v, np.ndarray):
+                # Vectorized apply for numpy arrays if possible, or list comp
+                if v.dtype.kind in {"U", "S", "O"}:  # String/Object types
+                    batch_or_row[k] = np.array([hash_val(item) for item in v])
+                else:
+                    batch_or_row[k] = v
+            else:
+                batch_or_row[k] = hash_val(v)
+
+    return batch_or_row
+
