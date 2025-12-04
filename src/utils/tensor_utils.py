@@ -1,8 +1,12 @@
 from typing import Optional, Tuple, Union
 
+import logging
 import torch
 
 from src.utils.file_utils import open_local_or_remote
+
+
+logger = logging.getLogger(__name__)
 
 
 def locations_to_index_tuple(locations: torch.Tensor, num_dims: int = 2) -> Tuple:
@@ -109,17 +113,25 @@ def merge_list_of_keyed_tensors_to_single_tensor(
     """
     batch_size = len(data)
     dimensions = torch.tensor(data[0][value_key]).size()
-    output_tensor = torch.zeros((batch_size, *dimensions))
-    for row in data:
-        index = row[index_key]
-        value = row[value_key]
-        if index < batch_size:
-            output_tensor[index] = torch.tensor(value)
-        else:
-            raise IndexError(
-                f"Index {index} out of bounds for batch size {batch_size}."
-            )
-    return output_tensor
+    try:
+        output_tensor = torch.zeros((batch_size, *dimensions))
+        for row in data:
+            index = row[index_key]
+            value = row[value_key]
+            if index < batch_size:
+                output_tensor[index] = torch.tensor(value)
+            else:
+                raise IndexError(
+                    f"Index {index} out of bounds for batch size {batch_size}."
+                )
+        return output_tensor
+    except (TypeError, IndexError) as e:
+        logger.warning(
+            f"Failed to merge tensors by index key '{index_key}': {e}. "
+            "Falling back to stacking tensors in list order. "
+            "NOTE: Row order in the resulting tensor may not match ID order."
+        )
+        return torch.stack([torch.tensor(row[value_key]) for row in data])
 
 
 def deduplicate_rows_in_tensor(

@@ -258,7 +258,7 @@ class LocalPickleWriter(BaseBufferedWriter):
 
     def _merge_files(self):
         """Merge all pickle files in the output directory into a single file."""
-        all_files = [f for f in os.listdir(self.output_dir) if f.endswith(".pkl")]
+        all_files = sorted([f for f in os.listdir(self.output_dir) if f.endswith(".pkl")])
         merged_data = []
         for file in all_files:
             with open(os.path.join(self.output_dir, file), "rb") as f:
