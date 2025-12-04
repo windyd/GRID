@@ -55,6 +55,7 @@ class SequenceDataModule(LightningDataModule):
         }
 
         self.stage_to_file_map: Dict[TrainerFn, Dict[int, List[str]]] = dict()
+        self.stage_to_sharing_status: Dict[TrainerFn, bool] = dict()
 
     def _get_partial_collate_fn(
         self, dataloader_config: BaseDataloaderConfig
@@ -111,6 +112,7 @@ class SequenceDataModule(LightningDataModule):
                 config is None
             ):  # config is None when we don't want to set up the stages. ie. For inference, we only initialize the predict stage.
                 self.stage_to_file_map[stage] = {}
+                self.stage_to_sharing_status[stage] = False
             else:
                 # If the stage has not been initialized yet, we assign files to workers based on the suffix passed by the config.
                 if stage not in self.stage_to_file_map:
@@ -121,7 +123,10 @@ class SequenceDataModule(LightningDataModule):
                     if hasattr(config, "limit_files") and config.limit_files:
                         list_of_files = list_of_files[: config.limit_files]
 
-                    self.stage_to_file_map[stage], _ = assign_files_to_workers(
+                    (
+                        self.stage_to_file_map[stage],
+                        self.stage_to_sharing_status[stage],
+                    ) = assign_files_to_workers(
                         list_of_files=list_of_files,
                         total_workers=self.trainer.world_size,
                         assign_by_size=config.assign_files_by_size,
@@ -156,12 +161,6 @@ class SequenceDataModule(LightningDataModule):
             raise AttributeError(f"Stage {stage} must initialize file map.")
         curr_config = self.stage_to_config[stage]
 
-        assign_all_files_per_worker = (
-            curr_config.assign_all_files_per_worker
-            if hasattr(curr_config, "assign_all_files_per_worker")
-            else False
-        )
-
         # We initialize the dataset with the parameters passed on the config.
         dataset = curr_config.dataset_class(
             dataset_config=curr_config.dataset_config,
@@ -170,6 +169,7 @@ class SequenceDataModule(LightningDataModule):
             batch_size=curr_config.batch_size_per_device,
             is_for_training=stage == TrainerFn.FITTING,
             assign_all_files_per_worker=assign_all_files_per_worker,
+            are_files_shared_across_processes=self.stage_to_sharing_status[stage],
         )  # type: ignore
 
         device_file_list = self.stage_to_file_map[stage].get(
@@ -345,6 +345,7 @@ class ItemDataModule(SequenceDataModule):
             batch_size=curr_config.batch_size_per_device,
             is_for_training=stage == TrainerFn.FITTING,
             assign_all_files_per_worker=assign_all_files_per_worker,
+            are_files_shared_across_processes=self.stage_to_sharing_status[stage],
         )  # type: ignore
 
         device_file_list = self.stage_to_file_map[stage].get(

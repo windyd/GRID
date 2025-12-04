@@ -18,6 +18,7 @@ class BaseDataset:
         batch_size: int = 1,
         is_for_training: bool = True,
         assign_all_files_per_worker: bool = False,
+        are_files_shared_across_processes: bool = False,
     ):
         """
         Base class for all datasets. This class is used to set up the dataset and provide the list of files to be used.
@@ -31,6 +32,8 @@ class BaseDataset:
                 This will enable each worker to access all files. Each worker will locally shuffle the files.
                 This would be useful for small datasets. In smaller datasets, if each worker only observes a subset of the files,
                 it may not be able to learn the distribution of the data.
+            are_files_shared_across_processes (bool): Whether the files are shared across processes or not.
+                If True, it means that the files are shared across processes (e.g. GPUs), so each process should only read a subset of the rows.
         """
         self.dataset_config = dataset_config
         self.should_shuffle_rows = should_shuffle_rows
@@ -39,6 +42,7 @@ class BaseDataset:
         self.batch_size = batch_size
         self.is_for_training = is_for_training
         self.assign_all_files_per_worker = assign_all_files_per_worker
+        self.are_files_shared_across_processes = are_files_shared_across_processes
 
     def set_list_of_files(self, list_of_files: List[str]):
         self.list_of_file_paths = list_of_files
@@ -69,7 +73,7 @@ class BaseDataset:
     def get_list_of_worker_files(self):
         # Get information about worker and then separate only files that belong to this worker
         worker_id, num_workers = self.get_worker_id_and_num_workers()
-        if self.assign_all_files_per_worker:
+        if self.assign_all_files_per_worker or self.are_files_shared_across_processes:
             worker_files = self.list_of_file_paths
         else:
             worker_files = self.list_of_file_paths[worker_id::num_workers]
@@ -95,6 +99,7 @@ class UnboundedSequenceIterable(BaseDataset, IterableDataset):
         batch_size: int = 1,
         is_for_training: bool = True,
         assign_all_files_per_worker: bool = False,
+        are_files_shared_across_processes: bool = False,
     ):
         super().__init__(
             dataset_config=dataset_config,
@@ -103,6 +108,7 @@ class UnboundedSequenceIterable(BaseDataset, IterableDataset):
             batch_size=batch_size,
             is_for_training=is_for_training,
             assign_all_files_per_worker=assign_all_files_per_worker,
+            are_files_shared_across_processes=are_files_shared_across_processes,
         )
         self.data_iterator = dataset_config.data_iterator
         self.dataset_to_iterate = None
@@ -110,6 +116,20 @@ class UnboundedSequenceIterable(BaseDataset, IterableDataset):
     def setup(self):
         # We update each worker's data iterator with the files just for that worker.
         self.data_iterator.update_list_of_file_paths(self.get_list_of_worker_files())
+
+        # Logic to handle row-level sharding if needed
+        _, num_workers = self.get_worker_id_and_num_workers()
+        if self.assign_all_files_per_worker or self.are_files_shared_across_processes:
+            # If files are assigned to all workers (either per GPU or across all GPUs), we need to shard the data
+            # to avoid duplication.
+            # self.total_workers is the number of GPUs
+            # num_workers is the number of workers per GPU
+            total_shards = self.total_workers * num_workers
+            shard_id = self.global_dataloader_worker_id
+            self.data_iterator.set_shard_info(
+                shard_index=shard_id, num_shards=total_shards
+            )
+
         self.data_iterator = (
             # here we use global_dataloader_worker_id as the seed for shuffling
             # this doesn't matter for the case where workers have non-overlapping files
@@ -141,7 +161,6 @@ class UnboundedSequenceIterable(BaseDataset, IterableDataset):
         # On a streaming dataset, we will always be on Epoch 0.
         finished_iteration = False
         while not finished_iteration:
-
             for row_or_batch in self.dataset_to_iterate:
                 for (
                     preprocessing_function

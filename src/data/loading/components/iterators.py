@@ -36,6 +36,12 @@ class RawDataIterator(ABC):
     ):
         self.list_of_file_paths = None
         self.should_shuffle_rows = None
+        self.shard_index = 0
+        self.num_shards = 1
+
+    def set_shard_info(self, shard_index: int, num_shards: int):
+        self.shard_index = shard_index
+        self.num_shards = num_shards
 
     def update_list_of_file_paths(self, list_of_file_paths: List[str]):
         self.list_of_file_paths = list_of_file_paths
@@ -88,6 +94,7 @@ class ParquetDataIterator(RawDataIterator):
     def iter_batches(self, batch_size: int) -> Dict[str, tf.Tensor]:  # type: ignore
         assert self.list_of_file_paths is not None, "list_of_file_paths is not set"
         for file_path in self.list_of_file_paths:
+            global_idx = 0
             with open_pyarrow_file(file_path) as f:
                 parquet_file = pq.ParquetFile(f)
 
@@ -97,7 +104,18 @@ class ParquetDataIterator(RawDataIterator):
                     else None,
                     batch_size=batch_size,
                 ):
-                    yield batch
+                    if self.num_shards > 1:
+                        num_rows = batch.num_rows
+                        indices = [
+                            i
+                            for i in range(num_rows)
+                            if (global_idx + i) % self.num_shards == self.shard_index
+                        ]
+                        global_idx += num_rows
+                        if indices:
+                            yield batch.take(indices)
+                    else:
+                        yield batch
 
     def shuffle(self, seed=42) -> RawDataIterator:
         random.seed(seed)
@@ -155,6 +173,9 @@ class TFRecordIterator(RawDataIterator):
             # too large might cause OOM
             raw_dataset = raw_dataset.shuffle(buffer_size=128)
 
+        if self.num_shards > 1:
+            raw_dataset = raw_dataset.shard(self.num_shards, self.shard_index)
+
         self.initialize_feature_description(raw_dataset)
         # We create an iterator and manually iterate to allow for retrying the
         # "next" operation in case of a failure.
@@ -176,6 +197,9 @@ class TFRecordIterator(RawDataIterator):
             # the larger the buffer, the more memory it will use
             # too large might cause OOM
             raw_dataset = raw_dataset.shuffle(buffer_size=128)
+
+        if self.num_shards > 1:
+            raw_dataset = raw_dataset.shard(self.num_shards, self.shard_index)
 
         self.initialize_feature_description(raw_dataset)
         # to avoid the issues with tf record warnings, we drop the last instances
@@ -256,15 +280,17 @@ class JsonlDataIterator(RawDataIterator):
             with open_local_or_remote(file_path, "rb") as f:
                 if is_gzipped:
                     with gzip.open(f, mode="rt") as text_f:
-                        for line in text_f:
-                            if line.strip():
-                                yield json.loads(line)
+                        for i, line in enumerate(text_f):
+                            if i % self.num_shards == self.shard_index:
+                                if line.strip():
+                                    yield json.loads(line)
 
                 else:
                     with io.TextIOWrapper(f, encoding="utf-8") as text_f:
-                        for line in text_f:
-                            if line.strip():
-                                yield json.loads(line)
+                        for i, line in enumerate(text_f):
+                            if i % self.num_shards == self.shard_index:
+                                if line.strip():
+                                    yield json.loads(line)
 
     def iter_batches(self, batch_size: int):
         assert self.list_of_file_paths is not None, "list_of_file_paths is not set"
