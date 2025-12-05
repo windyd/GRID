@@ -367,3 +367,36 @@ def convert_string_to_int_hash(
 
     return batch_or_row
 
+
+def add_instruction_prefix(
+    batch_or_row: Dict[str, Any],
+    features_to_apply: Optional[List[str]] = [],
+    instruction: str = "",
+    **kwargs,
+) -> Dict[str, Any]:
+    """
+    Prepends an instruction to the text features.
+    Format: "Instruct: {instruction}\nQuery:{text}"
+    """
+
+    # Helper to format a single value
+    def format_val(val):
+        if isinstance(val, str):
+            return f"Instruct: {instruction}\nQuery:{val}"
+        # If it's bytes (e.g. from tfrecord before decoding), we decode, format, and encode back?
+        # Or assume it's already string. The pipeline usually does convert_bytes_to_string first.
+        return val
+
+    for k, v in batch_or_row.items():
+        if is_feature_in_features_to_apply(features_to_apply, k):
+            if isinstance(v, list):
+                batch_or_row[k] = [format_val(item) for item in v]
+            elif isinstance(v, np.ndarray):
+                if v.dtype.kind in {"U", "S", "O"}:
+                    batch_or_row[k] = np.array([format_val(item) for item in v])
+            elif isinstance(v, str):
+                batch_or_row[k] = format_val(v)
+            # If bytes, we skip or we need to know encoding.
+            # Assuming convert_bytes_to_string is called before this.
+
+    return batch_or_row
