@@ -164,6 +164,7 @@ class BaseBufferedWriter(BasePredictionWriter):
         # this is an indicator of something not working fully as expected
         # i'll investigate this issue later
 
+
 class LocalPickleWriter(BaseBufferedWriter):
     """
     Callback to write predictions to local pickle files during inference.
@@ -258,7 +259,9 @@ class LocalPickleWriter(BaseBufferedWriter):
 
     def _merge_files(self):
         """Merge all pickle files in the output directory into a single file."""
-        all_files = sorted([f for f in os.listdir(self.output_dir) if f.endswith(".pkl")])
+        all_files = sorted(
+            [f for f in os.listdir(self.output_dir) if f.endswith(".pkl")]
+        )
         merged_data = []
         for file in all_files:
             with open(os.path.join(self.output_dir, file), "rb") as f:
@@ -281,3 +284,167 @@ class LocalPickleWriter(BaseBufferedWriter):
         log.info(
             f"Merged {len(merged_data_tensor)} rows into merged_predictions_tensor.pt. as pytorch tensor"
         )
+
+
+class LocalParquetWriter(BaseBufferedWriter):
+    """
+    Callback to write predictions to local parquet files during inference.
+    """
+
+    def __init__(
+        self,
+        output_dir: str,
+        flush_frequency: int = 1000,
+        write_interval: str = "batch",
+        should_merge_files_on_main: bool = True,
+        should_merge_list_of_keyed_tensors_to_single_tensor: bool = True,
+        post_processing_functions: Optional[List[Dict[str, callable]]] = None,
+        compression: str = "snappy",
+        **kwargs,
+    ):
+        """
+        Args:
+            output_dir: Directory to save the parquet files.
+            flush_frequency: Number of rows to accumulate
+                             before writing to a parquet file.
+            write_interval: "batch" or "epoch".
+            should_merge_files_on_main: If True, merge all files on the main process after writing.
+            should_merge_list_of_keyed_tensors_to_single_tensor: If True, merge list of keyed tensors to a single tensor.
+            post_processing_functions: List of ordered post-processing functions to apply to the files.
+            compression: Compression codec to use for parquet files.
+        """
+        super().__init__(
+            write_interval=write_interval, flush_frequency=flush_frequency, **kwargs
+        )
+        self.output_dir = output_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+        self.should_merge_files_on_main = should_merge_files_on_main
+        self.should_merge_list_of_keyed_tensors_to_single_tensor = (
+            should_merge_list_of_keyed_tensors_to_single_tensor
+        )
+        self.post_processing_functions = post_processing_functions or []
+        self.compression = compression
+
+    def _create_file_path(self) -> str:
+        """Create a file path for the parquet file."""
+        return f"predictions_{self.global_rank}_{datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%f')[:-3]}.parquet"
+
+    def _local_file_path(self, file_path: Optional[str] = None) -> str:
+        """Create a local file path for the parquet file."""
+        return (
+            f"{self.output_dir}/{file_path if file_path else self._create_file_path()}"
+        )
+
+    @staticmethod
+    def _convert_tensor_to_numpy(data: Any) -> Any:
+        if isinstance(data, torch.Tensor):
+            return data.cpu().numpy()
+        return data
+
+    def _prepare_data_for_parquet(
+        self, data: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        prepared_data = []
+        for row in data:
+            # Convert tensors to numpy for pyarrow compatibility
+            prepared_row = {k: self._convert_tensor_to_numpy(v) for k, v in row.items()}
+            prepared_data.append(prepared_row)
+        return prepared_data
+
+    @retry()
+    def _flush_buffer(self):
+        """Flush the buffer to a parquet file."""
+        file_path = self._create_file_path()
+
+        prepared_rows = self._prepare_data_for_parquet(self.rows_buffer)
+
+        try:
+            table = pa.Table.from_pylist(prepared_rows, schema=self.schema)
+            pq.write_table(
+                table,
+                self._local_file_path(file_path=file_path),
+                compression=self.compression,
+            )
+        except Exception as e:
+            log.error(f"Failed to write parquet file: {e}")
+            raise e
+
+        log.info(
+            f"Global Rank: {self.global_rank} wrote {len(self.rows_buffer)} rows to {self._local_file_path(file_path=file_path)}."
+        )
+
+    @retry()
+    def on_predict_end(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+    ) -> None:
+        super().on_predict_end(trainer, pl_module)
+
+        if self.should_merge_files_on_main:
+            if trainer.global_rank is not None:
+                torch.distributed.barrier()
+            if self.global_rank == 0:
+                log.info("Merging parquet files on main process.")
+                self._merge_files()
+
+            if trainer.global_rank is not None:
+                torch.distributed.barrier()
+
+        # conducting post-processing functions on the files
+        for process_func in self.post_processing_functions:
+            all_files = [f for f in os.listdir(self.output_dir)]
+            for file in all_files:
+                file_path = os.path.join(self.output_dir, file)
+                if process_func.get("main_only", False):
+                    if self.global_rank == 0:
+                        process_func["function"](file_path)
+                else:
+                    process_func["function"](file_path)
+                if trainer.global_rank is not None:
+                    torch.distributed.barrier()
+
+    def _merge_files(self):
+        """Merge all parquet files in the output directory into a single file."""
+        all_files = sorted(
+            [f for f in os.listdir(self.output_dir) if f.endswith(".parquet")]
+        )
+        if not all_files:
+            log.warning("No parquet files found to merge.")
+            return
+
+        try:
+            merged_table = pq.read_table(
+                [os.path.join(self.output_dir, f) for f in all_files]
+            )
+        except Exception as e:
+            log.error(f"Failed to read parquet files for merging: {e}")
+            raise e
+
+        for file in all_files:
+            os.remove(os.path.join(self.output_dir, file))
+
+        pq.write_table(
+            merged_table,
+            os.path.join(self.output_dir, "merged_predictions.parquet"),
+            compression=self.compression,
+        )
+        log.info(
+            f"Merged {merged_table.num_rows} rows into merged_predictions.parquet."
+        )
+
+        if self.should_merge_list_of_keyed_tensors_to_single_tensor:
+            merged_data = merged_table.to_pylist()
+
+            merged_data_tensor = merge_list_of_keyed_tensors_to_single_tensor(
+                data=merged_data,
+                index_key=self.prediction_key_name,
+                value_key=self.prediction_name,
+            )
+            torch.save(
+                merged_data_tensor.cpu(),
+                os.path.join(self.output_dir, "merged_predictions_tensor.pt"),
+            )
+            log.info(
+                f"Merged {len(merged_data_tensor)} rows into merged_predictions_tensor.pt. as pytorch tensor"
+            )
