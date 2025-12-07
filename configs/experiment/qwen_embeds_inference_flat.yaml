@@ -155,11 +155,12 @@ data_loading:
       #   _partial_: true
       #   features_to_apply:
       #   - content
-      - _target_: src.data.loading.components.pre_processing.add_instruction_prefix
-        _partial_: true
-        features_to_apply:
-        - content
-        instruction: "Given a web search query, retrieve relevant passages that answer the query"
+      # NOTE: we only apply this to queries not docs
+      # - _target_: src.data.loading.components.pre_processing.add_instruction_prefix
+      #   _partial_: true
+      #   features_to_apply:
+      #   - content
+      #   instruction: "Given a web search query, retrieve relevant passages that answer the query"
       - _target_: src.data.loading.components.pre_processing.tokenize_text_features
         # batch.update(input_ids=xxx, attention_mask=xxx) 
         _partial_: true
